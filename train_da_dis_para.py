@@ -10,11 +10,11 @@ import torch.utils.data
 import torch.nn as nn
 import torch.optim as optim
 import pre_process as prep
-from data_list import ImageList
+from data_list import ImageList, data_batch
 import lr_schedule
 from logger import Logger
 import numpy as np
-# from tensorboardX import SummaryWriter
+from tensorboardX import SummaryWriter
 
 import warnings
 from network import resnet50, resnet101
@@ -25,8 +25,6 @@ cudnn.benchmark = True
 cudnn.deterministic = True
 warnings.filterwarnings('ignore')
 
-align_all = {'mmd':MMD,
-             'grl':{}}
 
 def image_classification_test(loader, base_net, classifier_layer, test_10crop, config, num_iter):
     start_test = True
@@ -43,8 +41,8 @@ def image_classification_test(loader, base_net, classifier_layer, test_10crop, c
                 outputs = []
                 for j in range(10):
                     features_base = base_net(inputs[j])
-                    outputs = classifier_layer(features_base)
-                    outputs.append(nn.Softmax(dim=1)(outputs))
+                    output = classifier_layer(features_base)
+                    outputs.append(nn.Softmax(dim=1)(output))
                 outputs = sum(outputs)
                 if start_test:
                     all_output = outputs.float().cpu()
@@ -61,8 +59,7 @@ def image_classification_test(loader, base_net, classifier_layer, test_10crop, c
                 labels = data[1]
                 inputs = inputs.cuda()
                 labels = labels.cuda()
-                features_base = base_net(inputs)
-                outputs = classifier_layer(features_base)
+                outputs = classifier_layer(base_net(inputs))
 
                 if start_test:
                     all_output = outputs.float().cpu()
@@ -74,14 +71,22 @@ def image_classification_test(loader, base_net, classifier_layer, test_10crop, c
                     
     _, predict = torch.max(all_output, 1)
 
+    # accuracy for each class
+    class_num = config['network']['params']['class_num']
+    class_accuracy = {}
+    for i in range(class_num):
+        class_index = all_label == i
+        class_accuracy['cls_'+str(i)] = (torch.sum(torch.squeeze(predict[class_index]).float() == all_label[class_index]).item()\
+            / float(all_label[class_index].size()[0])) * 100.0
+
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
 
     if config['is_writer']:
         config['writer'].add_scalars('test', {'test error': 1.0 - accuracy,
-                                              'acc': accuracy * 100.0},
+                                              'acc': accuracy * 100.0}.update(class_accuracy),
                                      num_iter)
 
-    return accuracy * 100.0
+    return accuracy * 100.0, class_accuracy
 
 
 def train(config):
@@ -95,27 +100,42 @@ def train(config):
 
     data_set = {}
     dset_loaders = {}
-    data_config = config['data']
+    data_config = config['data']   
+    
     data_set['source'] = ImageList(open(data_config['source']['list_path']).readlines(),
                                    transform=prep_dict['source'])
-    dset_loaders['source'] = torch.utils.data.DataLoader(data_set['source'],
-                                                         batch_size=data_config['source']['batch_size'],
-                                                         shuffle=True, num_workers=0, drop_last=True)
     data_set['target'] = ImageList(open(data_config['target']['list_path']).readlines(),
                                    transform=prep_dict['target'])
+        
+    # random batch sampler or class-balance sampler for source dataloader
+    if config['data']['sampler'] == 'random':
+        dataloader_dict = {'batch_size': data_config['source']['batch_size'],
+                           'shuffle': True, 'drop_last': True}
+    elif config['data']['sampler'] == 'cls_balance':
+        s_gt = np.array(data_set['source'].imgs)[:, 1]
+        b_sampler = data_batch(s_gt, batch_size=data_config['source']['batch_size'], 
+                                drop_last=False, gt_flag=True, 
+                                num_class=config['network']['params']['class_num'], 
+                                num_batch=data_config['source']['batch_size'])
+        dataloader_dict = {'batch_sampler' : b_sampler}
+    else:
+        raise ValueError('sampler %s not found!' % (config['data']['sampler'])) 
+    
+    dset_loaders['source'] = torch.utils.data.DataLoader(data_set['source'], num_workers=16, 
+                                                         **dataloader_dict)
     dset_loaders['target'] = torch.utils.data.DataLoader(data_set['target'],
                                                          batch_size=data_config['target']['batch_size'],
-                                                         shuffle=True, num_workers=0, drop_last=True)
+                                                         shuffle=True, num_workers=16, drop_last=True)
     if config['prep']['test_10crop']:
         data_set['test'] = [ImageList(open(data_config['test']['list_path']).readlines(),
                                       transform=prep_dict['test'][i]) for i in range(10)]
         dset_loaders['test'] = [torch.utils.data.DataLoader(dset, batch_size=data_config['test']['batch_size'],
-                                                            shuffle=False, num_workers=0) for dset in data_set['test']]
+                                                            shuffle=False, num_workers=16) for dset in data_set['test']]
     else:
         data_set['test'] = ImageList(open(data_config['test']['list_path']).readlines(), transform=prep_dict['test'])
         dset_loaders['test'] = torch.utils.data.DataLoader(data_set['test'],
                                                            batch_size=data_config['test']['batch_size'],
-                                                           shuffle=False, num_workers=4)
+                                                           shuffle=False, num_workers=16)
 
     # set base network, classifier network, residual net
     class_num = config['network']['params']['class_num']
@@ -126,14 +146,14 @@ def train(config):
         base_network = resnet101()
     else:
         raise ValueError('base network %s not found!' % (net_config['name']))
-
-    feature_shape = base_network.out_features
-    classifier_layer = nn.Linear(feature_shape, class_num)
-
     base_network = base_network.cuda()
+    
+    classifier_layer = nn.Linear(base_network.out_features, class_num)
     classifier_layer = classifier_layer.cuda()
+    classifier_layer.weight.data.normal_(0, 0.01)
+    classifier_layer.bias.data.fill_(0.0)
+    
     softmax_layer = nn.Softmax().cuda()
-    align_loss = align_all[net_config['align']]
     
     # set optimizer
     parameter_list = [
@@ -154,15 +174,15 @@ def train(config):
     # train
     len_train_source = len(dset_loaders['source'])
     len_train_target = len(dset_loaders['target'])
+    iter_source = iter(dset_loaders['source'])
+    iter_target = iter(dset_loaders['target'])
     best_acc = 0.0
     since = time.time()
     for num_iter in tqdm(range(config['max_iter'])):
         if num_iter % config['val_iter'] == 0 and num_iter != 0:
             base_network.train(False)
             classifier_layer.train(False)
-            base_network = nn.Sequential(base_network)
-            classifier_layer = nn.Sequential(classifier_layer)
-            temp_acc = image_classification_test(loader=dset_loaders, base_net=base_network,
+            temp_acc, class_acc = image_classification_test(loader=dset_loaders, base_net=base_network,
                                                  classifier_layer=classifier_layer,
                                                  test_10crop=config['prep']['test_10crop'],
                                                  config=config, num_iter=num_iter
@@ -174,7 +194,12 @@ def train(config):
             log_str = 'iter: {:d}, all_accu: {:.4f},\ttime: {:.4f}'.format(num_iter, temp_acc, time.time() - since)
             config['logger'].logger.debug(log_str)
             config['results'][num_iter].append(temp_acc)
-
+            
+            class_acc_str = ''
+            for key in class_acc.keys():
+                class_acc_str += "{}: {:.4f}, ".format(key, class_acc[key])
+            config['logger'].logger.debug(class_acc_str)
+            
         # This has any effect only on modules such as Dropout or BatchNorm.
         base_network.train(True)
         classifier_layer.train(True)
@@ -187,10 +212,11 @@ def train(config):
                 m.bias.requires_grad = False
 
         # load data
-        if num_iter % len_train_source == 0:
+        if config['data']['sampler'] == 'random' and num_iter!=0 and num_iter % len_train_source == 0:
             iter_source = iter(dset_loaders['source'])
-        if num_iter % len_train_target == 0:
+        if num_iter!=0 and num_iter % len_train_target == 0:
             iter_target = iter(dset_loaders['target'])
+            
         inputs_source, labels_source = next(iter_source)
         inputs_target, _ = next(iter_target)
         inputs_source, inputs_target, labels_source = inputs_source.cuda(), inputs_target.cuda(), labels_source.cuda()
@@ -211,9 +237,8 @@ def train(config):
         entropy_loss = EntropyLoss(softmax_output_target)
 
         # alignment of L task-specific feature layers (Here, we have one layer)
-        transfer_loss = align_loss(features_base[:batch_size, :],
-                                   features_base[batch_size:, :])
-
+        transfer_loss = MMD(features_base[:batch_size, :],
+                            features_base[batch_size:, :])
 
         total_loss = classifier_loss + \
                      config['loss']['alpha_off'] * transfer_loss + \
@@ -223,13 +248,18 @@ def train(config):
         optimizer.step()
 
         if num_iter % config['val_iter'] == 0:
+            backbone_lr = optimizer.param_groups[0]['lr']
+            classifier_lr = optimizer.param_groups[1]['lr']
             config['logger'].logger.debug(
                 'class: {:.4f}\tmmd: {:.4f}\tentropy: {:.4f}'.format(classifier_loss.item(), 
                                                                      config['loss']['alpha_off'] * transfer_loss,
                                                                      config['loss']['beta_off'] * entropy_loss.item()))
+            config['logger'].logger.debug(
+                'backbone_lr: {:.4f}\tclassifier_lr: {:.4f}'.format(backbone_lr, classifier_lr))
             if config['is_writer']:
                 config['writer'].add_scalars('train', {'class': classifier_loss.item(), 'mmd': transfer_loss.item(),
-                                                       'entropy': config['loss']['beta_off'] * entropy_loss.item()},
+                                                       'entropy': config['loss']['beta_off'] * entropy_loss.item(),
+                                                       'backbone_lr': backbone_lr, 'classifier_lr': classifier_lr},
                                              num_iter)
 
     if config['is_writer']:
@@ -258,19 +288,20 @@ def print_dict(config):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='DA paradigm for DCA')
+    
+    parser = argparse.ArgumentParser(description='Distance based DA paradigm')
     parser.add_argument('--seed', type=int, default=1, help='manual seed')
     parser.add_argument('--gpu', type=str, nargs='?', default='1', help='device id to run')
     parser.add_argument('--net', type=str, default='50', choices=['50', '101'])
-    parser.add_argument('--data_set', default='home', choices=['home', 'domainnet', 'office', 'office_cida','office_20'], help='data set')
+    parser.add_argument('--sampler', type=str, default='random', choices=['cls_balance', 'random'])
+    parser.add_argument('--data_set', default='office_cida', choices=['home', 'domainnet', 'office', 'office_cida','office_20'], help='data set')
     parser.add_argument('--source_path', type=str, default='data/list/office/Art_65.txt', help='The source list')
     parser.add_argument('--target_path', type=str, default='data/list/office/Clipart_65.txt', help='The target list')
     parser.add_argument('--test_path', type=str, default='data/list/office/Clipart_65.txt', help='The test list')
-    parser.add_argument('--output_path', type=str, default='snapshot/', help='save ``log/scalar/model`` file path')
+    parser.add_argument('--output_path', type=str, default='snapshot/ac/', help='save ``log/scalar/model`` file path')
     parser.add_argument('--task', type=str, default='ac', help='transfer task name')
-    parser.add_argument('--align', type=str, default='mmd', choices=['grl', 'mmd'], help='align method')
     parser.add_argument('--max_iter', type=int, default=20001, help='max iterations')
-    parser.add_argument('--val_iter', type=int, default=500, help='interval of two continuous test phase')
+    parser.add_argument('--val_iter', type=int, default=1, help='interval of two continuous test phase')
     parser.add_argument('--lr', type=float, default=0.0001, help='learning rate (Default:1e-4')
     parser.add_argument('--batch_size', type=int, default=36, help='mini batch size')
     parser.add_argument('--beta_off', type=float, default=0.1, help='target entropy loss weight ')
@@ -289,19 +320,22 @@ if __name__ == '__main__':
     config = {'seed': args.seed, 'gpu': args.gpu, 'max_iter': args.max_iter, 'val_iter': args.val_iter,
               'data_set': args.data_set, 'task': args.task,
               'prep': {'test_10crop': True, 'params': {'resize_size': 256, 'crop_size': 224}},
-              'network': {'name': args.net, 'params': {'resnet_name': args.net, 'class_num': 65}, 'align':args.align},
+              'network': {'name': args.net, 'params': {'resnet_name': args.net, 'class_num': 65}},
               'optimizer': {'type': optim.SGD,
                             'optim_params': {'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.0005, 'nesterov': True},
                             'lr_type': 'inv', 'lr_param': {'lr': args.lr, 'gamma': 1.0, 'power': 0.75}},
               'data': {
                   'source': {'list_path': args.source_path, 'batch_size': args.batch_size},
                   'target': {'list_path': args.target_path, 'batch_size': args.batch_size},
-                  'test': {'list_path': args.test_path, 'batch_size': args.batch_size}},
+                  'test': {'list_path': args.test_path, 'batch_size': args.batch_size},
+                  'sampler': args.sampler},
               'output_path': args.output_path + args.data_set,
               'path': {'log': args.output_path + args.data_set + '/log/',
                        'scalar': args.output_path + args.data_set + '/scalar/',
                        'model': args.output_path + args.data_set + '/model/'},
-              'is_writer': args.is_writer
+              'is_writer': args.is_writer,
+              'loss': {'alpha_off': args.alpha_off,
+                      'beta_off': args.beta_off}
               }
     
     if config['data_set'] == 'home':
@@ -315,18 +349,15 @@ if __name__ == '__main__':
     else:
         raise ValueError('dataset %s not found!' % (config['data_set']))
 
-    config['loss'] = {'alpha_off': args.alpha_off,
-                      'beta_off': args.beta_off}
-
     if not os.path.exists(config['output_path']):
         os.makedirs(config['output_path'])
         os.makedirs(config['path']['log'])
         os.makedirs(config['path']['scalar'])
         os.makedirs(config['path']['model'])
-    # if config['is_writer']:
-    #     config['writer'] = SummaryWriter(log_dir=config['path']['scalar'])
+        
+    if config['is_writer']:
+        config['writer'] = SummaryWriter(log_dir=config['path']['scalar'])
     config['logger'] = Logger(logroot=config['path']['log'], filename=config['task'], level='debug')
-
     config['logger'].logger.debug(str(config))
 
     empty_dict(config)

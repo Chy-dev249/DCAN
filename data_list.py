@@ -37,7 +37,7 @@ class ImageList(Dataset):
         #     raise(RuntimeError("Found 0 image in subfolders of: " + root + "\n"
         #                        "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
 
-        self.imgs = imgs
+        self.imgs = imgs*50
         self.transform = transform
         self.target_transform = target_transform
         if mode == 'RGB':
