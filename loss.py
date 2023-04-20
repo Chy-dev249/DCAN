@@ -3,11 +3,13 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
-import math
-import torch.nn.functional as F
-import pdb
 
+def DANNLoss(features, ad_net):
+    ''' Adversarial Loss for source(1) and target(0) '''
+    ad_out = ad_net(features)
+    batch_size = ad_out.size(0) // 2
+    dc_target = torch.from_numpy(np.array([[1]] * batch_size + [[0]] * batch_size)).float().cuda()
+    return nn.BCELoss()(ad_out, dc_target)
 
 def EntropyLoss(input_):
     mask = input_.ge(0.0000001)

@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-
+import math
 import numpy as np
 from PIL import Image
-from torch.utils.data import Dataset
-import math
 
+import torch
+from torch.utils.data import Dataset
 
 def make_dataset(image_list, labels):
     if labels:
@@ -30,14 +30,91 @@ def l_loader(path):
             return img.convert('L')
 
 
-class ImageList(Dataset):
-    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB'):
+
+
+def get_rcs_class_probs(lines, temperature):
+    
+
+    overall_class_stats = {}
+    samples_with_class = {}
+    
+    for line in lines:
+        path = line.split(' ')[0]
+        c = line.split(' ')[1].split('\n')[0]
+        c = int(c)
+        
+        if c not in overall_class_stats:
+            overall_class_stats[c] = 1
+            samples_with_class[c] = []
+        else:
+            overall_class_stats[c] += 1
+        samples_with_class[c].append(path)
+        
+            
+            
+    overall_class_stats = {
+        k: v
+        for k, v in sorted(
+            overall_class_stats.items(), key=lambda item: item[1])
+    }
+    freq = torch.tensor(list(overall_class_stats.values()))
+    freq = freq / torch.sum(freq)
+    freq = 1 - freq
+    freq = torch.softmax(freq / temperature, dim=-1)
+
+    return list(overall_class_stats.keys()), freq.numpy(), samples_with_class
+
+
+class RCSList(object):
+    def __init__(self, image_list, class_temp = 0.01, labels=None, transform=None, target_transform=None, mode='RGB'):
         imgs = make_dataset(image_list, labels)
         # if len(imgs) == 0:
         #     raise(RuntimeError("Found 0 image in subfolders of: " + root + "\n"
         #                        "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
 
-        self.imgs = imgs*50
+        self.imgs = imgs*50 
+        self.transform = transform
+        self.target_transform = target_transform
+        if mode == 'RGB':
+            self.loader = rgb_loader
+        elif mode == 'L':
+            self.loader = l_loader
+        self.rcs_class_temp = class_temp
+        self.rcs_classes, self.rcs_classprob , self.samples_with_class = get_rcs_class_probs(
+                image_list, self.rcs_class_temp)
+          
+
+    def __getitem__(self, idx):
+    
+        c = np.random.choice(self.rcs_classes, p=self.rcs_classprob)
+        path = np.random.choice(self.samples_with_class[c])
+        target = c
+        img = self.loader(path)
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        
+        import pdb 
+        pdb.set_trace()
+            
+
+        return img, target
+     
+      
+
+    def __len__(self):
+        return len(self.imgs)
+
+
+class ImageList(Dataset):
+    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB', is_train=False):
+        imgs = make_dataset(image_list, labels)
+        # if len(imgs) == 0:
+        #     raise(RuntimeError("Found 0 image in subfolders of: " + root + "\n"
+        #                        "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
+
+        self.imgs = imgs*50 if is_train else imgs
         self.transform = transform
         self.target_transform = target_transform
         if mode == 'RGB':

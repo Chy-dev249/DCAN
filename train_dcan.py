@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 import pre_process as prep
 from pre_process import transforms
-from data_list import ImageList, data_batch
+from data_list import ImageList, data_batch, RCSList
 import lr_schedule
 from logger import Logger
 import numpy as np
@@ -108,8 +108,12 @@ def train(config):
     data_set = {}
     dset_loaders = {}
     data_config = config['data']
-    data_set['source'] = ImageList(open(data_config['source']['list_path']).readlines(),
+    if config['data']['rareClassSample']['opra']:
+        data_set['source'] = RCSList(open(data_config['source']['list_path']).readlines(),class_temp = config['data']['rareClassSample']['class_temp'],
                                    transform=prep_dict['source'])
+    else:
+        data_set['source'] = ImageList(open(data_config['source']['list_path']).readlines(),
+                                    transform=prep_dict['source'])
     s_gt = np.array(data_set['source'].imgs)[:, 1]
     
 
@@ -267,6 +271,7 @@ def train(config):
         iter_source = iter(dset_loaders['source'])
         iter_target = iter(dset_loaders['target'])
         inputs_source, labels_source = next(iter_source)
+
         inputs_target, _ = next(iter_target)
         batch_size = len(labels_source)
         
@@ -405,6 +410,8 @@ if __name__ == '__main__':
     parser.add_argument('--beta_off', type=float, default=0.1, help='target entropy loss weight ')
     parser.add_argument('--alpha_off', type=float, default=1.5, help='discrepancy loss weight')
     parser.add_argument('--is_writer', action='store_true', help='If added to sh, record for tensorboard')
+    parser.add_argument('--class_temp_val', type=float, default=0.1, help='temperature of rare class sampling ')
+    parser.add_argument('--class_temp', action='store_true', default = 'True', help = 'whether to do the rare class sampling ')
     args = parser.parse_args()
 
     # seed for everything
@@ -426,7 +433,7 @@ if __name__ == '__main__':
                   'source': {'list_path': args.source_path, 'batch_size': args.batch_size},
                   'target': {'list_path': args.target_path, 'batch_size': args.batch_size},
                   'test': {'list_path': args.test_path, 'batch_size': args.batch_size},
-                  'cls_balance' : True},
+                  'cls_balance' : True, 'rareClassSample' : {'opra' : True, 'class_temp' : args.class_temp_val }},
               'output_path': args.output_path + args.data_set,
               'path': {'log': args.output_path + args.data_set + '/log/',
                        'scalar': args.output_path + args.data_set + '/scalar/',

@@ -18,8 +18,8 @@ from loss import *
 import lr_schedule
 from logger import Logger
 import pre_process as prep
-from network import resnet50, resnet101
-from data_list import data_batch, ImageList
+from data_list import ImageList, data_batch
+from network import resnet50, resnet101, AdversarialNetwork
 
 cudnn.benchmark = True
 cudnn.deterministic = True
@@ -147,6 +147,9 @@ def train(config):
         raise ValueError('base network %s not found!' % (net_config['name']))
     base_network = base_network.cuda()
     
+    adversarial_net = AdversarialNetwork(base_network.out_features, 1024)
+    adversarial_net = adversarial_net.cuda().train(True)
+    
     classifier_layer = nn.Linear(base_network.out_features, class_num)
     classifier_layer = classifier_layer.cuda()
     classifier_layer.weight.data.normal_(0, 0.01)
@@ -157,7 +160,8 @@ def train(config):
     # set optimizer
     parameter_list = [
         {'params': base_network.parameters(), 'lr_mult': 1, 'decay_mult': 2},
-        {'params': classifier_layer.parameters(), 'lr_mult': 10, 'decay_mult': 2}
+        {'params': classifier_layer.parameters(), 'lr_mult': 10, 'decay_mult': 2},
+        {"params": adversarial_net.parameters(), "lr_mult":10, 'decay_mult':2}
     ]
     optimizer_config = config['optimizer']
     optimizer = optimizer_config['type'](parameter_list, **(optimizer_config['optim_params']))
@@ -236,8 +240,7 @@ def train(config):
         entropy_loss = EntropyLoss(softmax_output_target)
 
         # alignment of L task-specific feature layers (Here, we have one layer)
-        transfer_loss = MMD(features_base[:batch_size, :],
-                            features_base[batch_size:, :])
+        transfer_loss = DANNLoss(features_base, adversarial_net)
 
         total_loss = classifier_loss + \
                      config['loss']['alpha_off'] * transfer_loss + \
@@ -250,13 +253,13 @@ def train(config):
             backbone_lr = optimizer.param_groups[0]['lr']
             classifier_lr = optimizer.param_groups[1]['lr']
             config['logger'].logger.debug(
-                'class: {:.4f}\tmmd: {:.4f}\tentropy: {:.4f}'.format(classifier_loss.item(), 
+                'class: {:.4f}\tadv: {:.4f}\tentropy: {:.4f}'.format(classifier_loss.item(), 
                                                                      config['loss']['alpha_off'] * transfer_loss,
                                                                      config['loss']['beta_off'] * entropy_loss.item()))
             config['logger'].logger.debug(
                 'backbone_lr: {:.4f}\tclassifier_lr: {:.4f}'.format(backbone_lr, classifier_lr))
             if config['is_writer']:
-                config['writer'].add_scalars('train', {'class': classifier_loss.item(), 'mmd': transfer_loss.item(),
+                config['writer'].add_scalars('train', {'class': classifier_loss.item(), 'adv': transfer_loss.item(),
                                                        'entropy': config['loss']['beta_off'] * entropy_loss.item(),
                                                        'backbone_lr': backbone_lr, 'classifier_lr': classifier_lr},
                                              num_iter)
@@ -288,7 +291,7 @@ def print_dict(config):
 
 if __name__ == '__main__':
     
-    parser = argparse.ArgumentParser(description='Distance based DA paradigm')
+    parser = argparse.ArgumentParser(description='Adversarial based DA paradigm')
     parser.add_argument('--seed', type=int, default=1, help='manual seed')
     parser.add_argument('--gpu', type=str, nargs='?', default='1', help='device id to run')
     parser.add_argument('--net', type=str, default='50', choices=['50', '101'])
@@ -304,7 +307,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.0001, help='learning rate (Default:1e-4')
     parser.add_argument('--batch_size', type=int, default=36, help='mini batch size')
     parser.add_argument('--beta_off', type=float, default=0.1, help='target entropy loss weight ')
-    parser.add_argument('--alpha_off', type=float, default=1.5, help='discrepancy loss weight')
+    parser.add_argument('--alpha_off', type=float, default=1.0, help='discrepancy loss weight')
     parser.add_argument('--is_writer', action='store_true', help='If added to sh, record for tensorboard')
     args = parser.parse_args()
 
@@ -316,7 +319,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
-    
+
     config = {'seed': args.seed, 'gpu': args.gpu, 'max_iter': args.max_iter, 'val_iter': args.val_iter,
               'data_set': args.data_set, 'task': args.task,
               'prep': {'test_10crop': True, 'params': {'resize_size': 256, 'crop_size': 224}},
@@ -324,6 +327,7 @@ if __name__ == '__main__':
               'optimizer': {'type': optim.SGD,
                             'optim_params': {'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.0005, 'nesterov': True},
                             'lr_type': 'inv', 'lr_param': {'lr': args.lr, 'gamma': 1.0, 'power': 0.75}},
+                            #'lr_type': 'inv', 'lr_param': {'lr': args.lr, 'gamma': 0.001, 'power': 0.75}},
               'data': {
                   'source': {'list_path': args.source_path, 'batch_size': args.batch_size},
                   'target': {'list_path': args.target_path, 'batch_size': args.batch_size},
