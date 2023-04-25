@@ -31,7 +31,7 @@
 
 
 # 打开文件并读取每一行
-with open('/home/huiying/uda/DCAN/data/list/office/dslr_31_my.txt', 'r') as f:
+with open('/home/huiying/uda/dcan/data/list/office/webcam_31_my.txt', 'r') as f:
     lines = f.readlines()
 
 new_lines = ''
@@ -40,9 +40,13 @@ for i in range(len(lines)):
     cls_num = lines[i].split(' ')[1].split('\n')[0]
     path = lines[i].split(' ')[0]
 
-    if int(cls_num) < 10 or (int(cls_num) >= 21 and int(cls_num) <= 30):
-        if int(cls_num) >= 21 and int(cls_num) <= 30:
-            cls_num = int(cls_num) - 11
+    # if int(cls_num) < 10 or (int(cls_num) >= 21 and int(cls_num) <= 30):
+    #     if int(cls_num) >= 21 and int(cls_num) <= 30:
+    #         cls_num = int(cls_num) - 11
+    #     temp = path + ' ' + str(cls_num) + '\n'
+        
+    #     new_lines += temp
+    if int(cls_num) < 10:
         temp = path + ' ' + str(cls_num) + '\n'
         
         new_lines += temp
@@ -50,5 +54,5 @@ for i in range(len(lines)):
         
 
 # 写入修改后的内容到新的文件
-with open('/home/huiying/uda/DCAN/data/list/office/dslr_20.txt', 'w') as f:
+with open('/home/huiying/uda/dcan/data/list/office_cida/webcam_10.txt', 'w') as f:
     f.writelines(new_lines)

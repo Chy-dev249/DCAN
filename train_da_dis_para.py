@@ -19,11 +19,12 @@ import lr_schedule
 from logger import Logger
 import pre_process as prep
 from network import resnet50, resnet101
-from data_list import data_batch, ImageList
+from data_list import data_batch, ImageList, SCPList
 
 cudnn.benchmark = True
 cudnn.deterministic = True
 warnings.filterwarnings('ignore')
+
 
 def image_classification_test(loader, base_net, classifier_layer, test_10crop, config, num_iter):
     start_test = True
@@ -67,9 +68,7 @@ def image_classification_test(loader, base_net, classifier_layer, test_10crop, c
                 else:
                     all_output = torch.cat((all_output, outputs.float().cpu()), 0)
                     all_label = torch.cat((all_label, labels.float().cpu()), 0)           
-                    
     _, predict = torch.max(all_output, 1)
-
     # accuracy for each class
     class_num = config['network']['params']['class_num']
     class_accuracy = {}
@@ -77,14 +76,10 @@ def image_classification_test(loader, base_net, classifier_layer, test_10crop, c
         class_index = all_label == i
         class_accuracy['cls_'+str(i)] = (torch.sum(torch.squeeze(predict[class_index]).float() == all_label[class_index]).item()\
             / float(all_label[class_index].size()[0])) * 100.0
-
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
-
     if config['is_writer']:
-        config['writer'].add_scalars('test', {'test error': 1.0 - accuracy,
-                                              'acc': accuracy * 100.0}.update(class_accuracy),
-                                     num_iter)
-
+        class_accuracy.update({'test error': 1.0 - accuracy, 'acc': accuracy * 100.0})
+        config['writer'].add_scalars('test', class_accuracy, num_iter)
     return accuracy * 100.0, class_accuracy
 
 
@@ -99,28 +94,36 @@ def train(config):
 
     data_set = {}
     dset_loaders = {}
-    data_config = config['data']   
+    data_config = config['data']  
     
     data_set['source'] = ImageList(open(data_config['source']['list_path']).readlines(),
-                                   transform=prep_dict['source'], is_train=True)
+                                    transform=prep_dict['source'], is_train=True)  
     data_set['target'] = ImageList(open(data_config['target']['list_path']).readlines(),
-                                   transform=prep_dict['target'], is_train=False)
+                                   transform=prep_dict['target'], is_train=True)
         
     # random batch sampler or class-balance sampler for source dataloader
     if config['data']['sampler'] == 'random':
         dataloader_dict = {'batch_size': data_config['source']['batch_size'],
-                           'shuffle': True, 'drop_last': True}
+                           'shuffle': True, 'drop_last': True, 'num_workers': 16}
     elif config['data']['sampler'] == 'cls_balance':
         s_gt = np.array(data_set['source'].imgs)[:, 1]
         b_sampler = data_batch(s_gt, batch_size=data_config['source']['batch_size'], 
                                 drop_last=False, gt_flag=True, 
                                 num_class=config['network']['params']['class_num'], 
                                 num_batch=data_config['source']['batch_size'])
-        dataloader_dict = {'batch_sampler' : b_sampler}
+        dataloader_dict = {'batch_sampler' : b_sampler, 'num_workers': 16}
+    elif 'scp' in config['data']['sampler']:
+        data_set['source'] = SCPList(open(data_config['source']['list_path']).readlines(),
+                                   transform=prep_dict['source'],
+                                   dynamic_p=config['data']['dynamic_p'],
+                                   max_temp=config['data']['max_temp'],
+                                   min_temp=config['data']['min_temp'])
+        dataloader_dict = {'batch_size': data_config['source']['batch_size'],
+                           'shuffle': True, 'drop_last': True, 'num_workers': 16}          
     else:
         raise ValueError('sampler %s not found!' % (config['data']['sampler'])) 
     
-    dset_loaders['source'] = torch.utils.data.DataLoader(data_set['source'], num_workers=16, 
+    dset_loaders['source'] = torch.utils.data.DataLoader(data_set['source'], 
                                                          **dataloader_dict)
     dset_loaders['target'] = torch.utils.data.DataLoader(data_set['target'],
                                                          batch_size=data_config['target']['batch_size'],
@@ -146,12 +149,10 @@ def train(config):
     else:
         raise ValueError('base network %s not found!' % (net_config['name']))
     base_network = base_network.cuda()
-    
     classifier_layer = nn.Linear(base_network.out_features, class_num)
     classifier_layer = classifier_layer.cuda()
     classifier_layer.weight.data.normal_(0, 0.01)
     classifier_layer.bias.data.fill_(0.0)
-    
     softmax_layer = nn.Softmax().cuda()
     
     # set optimizer
@@ -189,11 +190,9 @@ def train(config):
             if temp_acc > best_acc:
                 best_acc = temp_acc
                 best_model = {'base': base_network.state_dict(), 'classifier': classifier_layer.state_dict()}
-
             log_str = 'iter: {:d}, all_accu: {:.4f},\ttime: {:.4f}'.format(num_iter, temp_acc, time.time() - since)
             config['logger'].logger.debug(log_str)
             config['results'][num_iter].append(temp_acc)
-            
             class_acc_str = ''
             for key in class_acc.keys():
                 class_acc_str += "{}: {:.4f}, ".format(key, class_acc[key])
@@ -211,22 +210,25 @@ def train(config):
                 m.bias.requires_grad = False
 
         # load data
-        if config['data']['sampler'] == 'random' and num_iter!=0 and num_iter % len_train_source == 0:
+        if config['data']['sampler'] != 'cls_balance' and num_iter!=0 and num_iter % len_train_source == 0:
             iter_source = iter(dset_loaders['source'])
         if num_iter!=0 and num_iter % len_train_target == 0:
             iter_target = iter(dset_loaders['target'])
-            
         inputs_source, labels_source = next(iter_source)
+        if config['data']['sampler'] == 'scp_d':
+            dset_loaders['source'].dataset.update_current_iter()
         inputs_target, _ = next(iter_target)
         inputs_source, inputs_target, labels_source = inputs_source.cuda(), inputs_target.cuda(), labels_source.cuda()
 
+        # update lr and optimizer
         optimizer = lr_scheduler(optimizer, num_iter / config['max_iter'], **schedule_param)
         optimizer.zero_grad()
 
+        # network forward
         inputs = torch.cat((inputs_source, inputs_target), dim=0)
         features_base = base_network(inputs)
-
         batch_size = data_config['test']['batch_size']
+        
         # source classification loss
         output_base = classifier_layer(features_base)
         classifier_loss = class_criterion(output_base[:batch_size, :], labels_source)
@@ -239,10 +241,10 @@ def train(config):
         transfer_loss = MMD(features_base[:batch_size, :],
                             features_base[batch_size:, :])
 
+        # total loss and update network
         total_loss = classifier_loss + \
                      config['loss']['alpha_off'] * transfer_loss + \
                      config['loss']['beta_off'] * entropy_loss
-                     
         total_loss.backward()
         optimizer.step()
 
@@ -250,20 +252,18 @@ def train(config):
             backbone_lr = optimizer.param_groups[0]['lr']
             classifier_lr = optimizer.param_groups[1]['lr']
             config['logger'].logger.debug(
-                'class: {:.4f}\tmmd: {:.4f}\tentropy: {:.4f}'.format(classifier_loss.item(), 
+                'class: {:.4f}\tdis: {:.4f}\tentropy: {:.4f}'.format(classifier_loss.item(), 
                                                                      config['loss']['alpha_off'] * transfer_loss,
                                                                      config['loss']['beta_off'] * entropy_loss.item()))
             config['logger'].logger.debug(
                 'backbone_lr: {:.4f}\tclassifier_lr: {:.4f}'.format(backbone_lr, classifier_lr))
             if config['is_writer']:
-                config['writer'].add_scalars('train', {'class': classifier_loss.item(), 'mmd': transfer_loss.item(),
+                config['writer'].add_scalars('train', {'class': classifier_loss.item(), 'dis': transfer_loss.item(),
                                                        'entropy': config['loss']['beta_off'] * entropy_loss.item(),
                                                        'backbone_lr': backbone_lr, 'classifier_lr': classifier_lr},
                                              num_iter)
-
     if config['is_writer']:
         config['writer'].close()
-
     torch.save(best_model, osp.join(config['path']['model'], config['task'] + '_best_model.pth'))
     return best_acc
 
@@ -290,15 +290,15 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='Distance based DA paradigm')
     parser.add_argument('--seed', type=int, default=1, help='manual seed')
-    parser.add_argument('--gpu', type=str, nargs='?', default='1', help='device id to run')
+    parser.add_argument('--gpu', type=str, nargs='?', default='2', help='device id to run')
     parser.add_argument('--net', type=str, default='50', choices=['50', '101'])
-    parser.add_argument('--sampler', type=str, default='random', choices=['cls_balance', 'random'])
+    parser.add_argument('--sampler', type=str, default='scp_d', choices=['cls_balance', 'random', 'scp', 'scp_d'])
     parser.add_argument('--data_set', default='office_cida', choices=['home', 'domainnet', 'office', 'office_cida','office_20'], help='data set')
-    parser.add_argument('--source_path', type=str, default='data/list/office/Art_65.txt', help='The source list')
-    parser.add_argument('--target_path', type=str, default='data/list/office/Clipart_65.txt', help='The target list')
-    parser.add_argument('--test_path', type=str, default='data/list/office/Clipart_65.txt', help='The test list')
-    parser.add_argument('--output_path', type=str, default='snapshot/ac/', help='save ``log/scalar/model`` file path')
-    parser.add_argument('--task', type=str, default='ac', help='transfer task name')
+    parser.add_argument('--source_path', type=str, default='/home/huiying/uda/dcan/data/list/office_cida/dslr_10_oneshot_addAmazon.txt', help='The source list')
+    parser.add_argument('--target_path', type=str, default='/home/huiying/uda/dcan/data/list/office_cida/amazon_20_oneshot.txt', help='The target list')
+    parser.add_argument('--test_path', type=str, default='/home/huiying/uda/dcan/data/list/office_cida/amazon_20_oneshot.txt', help='The test list')
+    parser.add_argument('--output_path', type=str, default='snapshot/dca_dis_scp100d_da/', help='save ``log/scalar/model`` file path')
+    parser.add_argument('--task', type=str, default='da', help='transfer task name')
     parser.add_argument('--max_iter', type=int, default=20001, help='max iterations')
     parser.add_argument('--val_iter', type=int, default=500, help='interval of two continuous test phase')
     parser.add_argument('--lr', type=float, default=0.0001, help='learning rate (Default:1e-4')
@@ -306,6 +306,8 @@ if __name__ == '__main__':
     parser.add_argument('--beta_off', type=float, default=0.1, help='target entropy loss weight ')
     parser.add_argument('--alpha_off', type=float, default=1.5, help='discrepancy loss weight')
     parser.add_argument('--is_writer', action='store_true', help='If added to sh, record for tensorboard')
+    parser.add_argument('--max_temp', type=float, default=100.0, help='the value of max temperature')
+    parser.add_argument('--min_temp', type=float, default=1.0, help='the value of min temperature')
     args = parser.parse_args()
 
     os.environ['PYTHONASHSEED'] = str(args.seed)
@@ -355,11 +357,17 @@ if __name__ == '__main__':
         os.makedirs(config['path']['scalar'])
         os.makedirs(config['path']['model'])
         
+    if 'scp' in config['data']['sampler']:
+        config['data']['max_temp'] = args.max_temp
+        config['data']['min_temp'] = args.min_temp
+        config['data']['dynamic_p'] = True if 'd' in config['data']['sampler'] else False
+    
     if config['is_writer']:
         config['writer'] = SummaryWriter(log_dir=config['path']['scalar'])
     config['logger'] = Logger(logroot=config['path']['log'], filename=config['task'], level='debug')
     config['logger'].logger.debug(str(config))
-
+        
     empty_dict(config)
     config['results']['best'].append(train(config))
     print_dict(config)
+

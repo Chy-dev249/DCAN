@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
 import math
 import numpy as np
 from PIL import Image
 
 import torch
 from torch.utils.data import Dataset
+
 
 def make_dataset(image_list, labels):
     if labels:
@@ -30,18 +30,12 @@ def l_loader(path):
             return img.convert('L')
 
 
-
-
-def get_rcs_class_probs(lines, temperature):
-    
-
+def get_class_state(lines):
     overall_class_stats = {}
     samples_with_class = {}
-    
     for line in lines:
         path = line.split(' ')[0]
-        c = line.split(' ')[1].split('\n')[0]
-        c = int(c)
+        c = int(line.split(' ')[1].split('\n')[0])
         
         if c not in overall_class_stats:
             overall_class_stats[c] = 1
@@ -49,59 +43,59 @@ def get_rcs_class_probs(lines, temperature):
         else:
             overall_class_stats[c] += 1
         samples_with_class[c].append(path)
-        
+    overall_class_stats = {k: v
+                            for k, v in sorted(
+                            overall_class_stats.items(), key=lambda item: item[1])}
+    class_freq = torch.tensor(list(overall_class_stats.values()))
+    return class_freq, samples_with_class, list(overall_class_stats.keys())
+    
+    
+def get_class_probs(class_freq, temperature):
+    return torch.softmax(class_freq / temperature, dim=-1).numpy()
             
-            
-    overall_class_stats = {
-        k: v
-        for k, v in sorted(
-            overall_class_stats.items(), key=lambda item: item[1])
-    }
-    freq = torch.tensor(list(overall_class_stats.values()))
-    freq = freq / torch.sum(freq)
-    freq = 1 - freq
-    freq = torch.softmax(freq / temperature, dim=-1)
 
-    return list(overall_class_stats.keys()), freq.numpy(), samples_with_class
+def get_class_temp_linear(max_temp, min_temp, max_iter, current_iter):
+    temp = max_temp - (max_temp-min_temp) / max_iter * current_iter
+    return temp
 
 
-class RCSList(object):
-    def __init__(self, image_list, class_temp = 0.01, labels=None, transform=None, target_transform=None, mode='RGB'):
-        imgs = make_dataset(image_list, labels)
-        # if len(imgs) == 0:
-        #     raise(RuntimeError("Found 0 image in subfolders of: " + root + "\n"
-        #                        "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
-
-        self.imgs = imgs*50 
+class SCPList(Dataset):
+    ''' Sample by class probability '''
+    def __init__(self, image_list, labels=None, mode='RGB', dynamic_p=True,
+                 transform=None, target_transform=None, max_iter=20000, max_temp = 1, min_temp = 0.01):
+        self.imgs = make_dataset(image_list, labels)*50
+        self.class_freq, self.class_samples, self.class_keys = get_class_state(image_list)
         self.transform = transform
         self.target_transform = target_transform
         if mode == 'RGB':
             self.loader = rgb_loader
         elif mode == 'L':
             self.loader = l_loader
-        self.rcs_class_temp = class_temp
-        self.rcs_classes, self.rcs_classprob , self.samples_with_class = get_rcs_class_probs(
-                image_list, self.rcs_class_temp)
-          
-
+        self.image_list = image_list
+        self.max_iter = max_iter
+        self.max_temp = max_temp
+        self.min_temp = min_temp
+        self.dynamic_p = dynamic_p
+        self.current_iter = 0
+        
     def __getitem__(self, idx):
-    
-        c = np.random.choice(self.rcs_classes, p=self.rcs_classprob)
-        path = np.random.choice(self.samples_with_class[c])
-        target = c
+        if self.dynamic_p:
+            class_temp = get_class_temp_linear(self.max_temp, self.min_temp,
+                                               self.max_iter, self.current_iter)
+        else:
+            class_temp = self.max_temp
+        class_probs = get_class_probs(self.class_freq, class_temp)
+        target = np.random.choice(self.class_keys, p=class_probs)
+        path = np.random.choice(self.class_samples[target])
         img = self.loader(path)
         if self.transform is not None:
             img = self.transform(img)
         if self.target_transform is not None:
             target = self.target_transform(target)
-        
-        import pdb 
-        pdb.set_trace()
-            
-
         return img, target
      
-      
+    def update_current_iter(self):
+        self.current_iter += 1
 
     def __len__(self):
         return len(self.imgs)
@@ -179,6 +173,7 @@ class DsetThreeChannels(Dataset):
 
     def __len__(self):
         return len(self.dset)
+
 
 class data_batch:
     def __init__(self, gt_data, batch_size: int, drop_last: bool, gt_flag: bool, num_class: int, num_batch: int) -> None:

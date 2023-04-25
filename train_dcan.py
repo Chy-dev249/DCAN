@@ -105,11 +105,12 @@ def train(config):
     else:
         prep_dict['test'] = prep.image_test(**config['prep']['params'])
 
+    
     data_set = {}
     dset_loaders = {}
     data_config = config['data']
     if config['data']['rareClassSample']['opra']:
-        data_set['source'] = RCSList(open(data_config['source']['list_path']).readlines(),class_temp = config['data']['rareClassSample']['class_temp'],
+        data_set['source'] = RCSList(open(data_config['source']['list_path']).readlines(),
                                    transform=prep_dict['source'])
     else:
         data_set['source'] = ImageList(open(data_config['source']['list_path']).readlines(),
