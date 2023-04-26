@@ -172,8 +172,6 @@ def train(config):
         loss_config['params'] = {}
 
     # train
-    len_train_source = len(dset_loaders['source'])
-    len_train_target = len(dset_loaders['target'])
     iter_source = iter(dset_loaders['source'])
     iter_target = iter(dset_loaders['target'])
     best_acc = 0.0
@@ -210,13 +208,7 @@ def train(config):
                 m.bias.requires_grad = False
 
         # load data
-        if config['data']['sampler'] != 'cls_balance' and num_iter!=0 and num_iter % len_train_source == 0:
-            iter_source = iter(dset_loaders['source'])
-        if num_iter!=0 and num_iter % len_train_target == 0:
-            iter_target = iter(dset_loaders['target'])
         inputs_source, labels_source = next(iter_source)
-        if config['data']['sampler'] == 'scp_d':
-            dset_loaders['source'].dataset.update_current_iter()
         inputs_target, _ = next(iter_target)
         inputs_source, inputs_target, labels_source = inputs_source.cuda(), inputs_target.cuda(), labels_source.cuda()
 

@@ -62,8 +62,13 @@ def get_class_temp_linear(max_temp, min_temp, max_iter, current_iter):
 class SCPList(Dataset):
     ''' Sample by class probability '''
     def __init__(self, image_list, labels=None, mode='RGB', dynamic_p=True,
-                 transform=None, target_transform=None, max_iter=20000, max_temp = 1, min_temp = 0.01):
-        self.imgs = make_dataset(image_list, labels)*50
+                 transform=None, target_transform=None, max_iter=20000, max_temp = 1, min_temp = 0.01, batchsize=36):
+        # repeat dataset for setting drop_last=True
+        total_data_num = max_iter*batchsize
+        self.imgs = make_dataset(image_list, labels)
+        repeat_factor = total_data_num//len(self.imgs) + 1
+        self.imgs = self.imgs * repeat_factor
+        
         self.class_freq, self.class_samples, self.class_keys = get_class_state(image_list)
         self.transform = transform
         self.target_transform = target_transform
@@ -108,13 +113,14 @@ class SCPList(Dataset):
 
 
 class ImageList(Dataset):
-    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB', is_train=False):
-        imgs = make_dataset(image_list, labels)
-        # if len(imgs) == 0:
-        #     raise(RuntimeError("Found 0 image in subfolders of: " + root + "\n"
-        #                        "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
+    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB', is_train=False, batchsize=36, max_iter=20000):
+        # repeat dataset for setting drop_last=True
+        self.imgs = make_dataset(image_list, labels)
+        if is_train:
+            total_data_num = max_iter*batchsize
+            repeat_factor = total_data_num//len(self.imgs) + 1
+            self.imgs = self.imgs * repeat_factor
 
-        self.imgs = imgs*50 if is_train else imgs
         self.transform = transform
         self.target_transform = target_transform
         if mode == 'RGB':
