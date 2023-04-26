@@ -1,17 +1,26 @@
-# 打开文件并读取每一行
-with open('/home/huiying/uda/BIWAA/data/Office31/webcam.txt', 'r') as f:
-    lines = f.readlines()
+import os
+path_pre = '/home/huiying/uda/dcan/data/list/home/'
+files = os.listdir(path_pre)
+for txt in files:
+    file_name = path_pre + txt
+    with open(file_name, 'r') as f:
+        lines = f.readlines()
+    # 替换每一行中的字符
+        for i in range(len(lines)):
+            lines[i] = lines[i].replace('/data1/TL/data/office-home-65/', '/data/huiying/officehome/')
 
-# 替换每一行中的字符
-for i in range(len(lines)):
-    lines[i] = lines[i].replace('webcam/images/', '/data/huiying/office31/webcam/','/home/changhuiying/DCAN-master/data/')
+    # 写入修改后的内容到新的文件
+    with open(file_name, 'w') as f:
+        f.writelines(lines)
 
-# 写入修改后的内容到新的文件
-with open('/home/huiying/uda/BIWAA/data/Office31/webcam_my.txt', 'w') as f:
-    f.writelines(lines)
+        
 
 
-p = '/home/huiying/uda/dcan/data/list/office_cida'
+# # 打开文件并读取每一行
+# with open('/home/huiying/uda/dcan/data/list/home/Art_65.txt', 'r') as f:
+    
+
+# p = '/home/huiying/uda/dcan/data/list/office_cida'
 
 
 # import random

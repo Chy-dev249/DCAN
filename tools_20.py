@@ -31,7 +31,7 @@
 
 
 # 打开文件并读取每一行
-with open('/home/huiying/uda/dcan/data/list/office/webcam_31_my.txt', 'r') as f:
+with open('/home/huiying/uda/dcan/data/list/home/Clipart_65.txt', 'r') as f:
     lines = f.readlines()
 
 new_lines = ''
@@ -46,13 +46,14 @@ for i in range(len(lines)):
     #     temp = path + ' ' + str(cls_num) + '\n'
         
     #     new_lines += temp
-    if int(cls_num) < 10:
-        temp = path + ' ' + str(cls_num) + '\n'
+    if int(cls_num) >= 40 and '00001' in path:
+        continue
         
-        new_lines += temp
+    temp = path + ' ' + str(cls_num) + '\n'
+    new_lines += temp
         
         
 
 # 写入修改后的内容到新的文件
-with open('/home/huiying/uda/dcan/data/list/office_cida/webcam_10.txt', 'w') as f:
+with open('/home/huiying/uda/dcan/data/list/home/Clipart_65_oneshot.txt', 'w') as f:
     f.writelines(new_lines)
