@@ -45,13 +45,13 @@ def get_class_state(lines):
         samples_with_class[c].append(path)
     overall_class_stats = {k: v
                             for k, v in sorted(
-                            overall_class_stats.items(), key=lambda item: item[1])}
+                            overall_class_stats.items(), key=lambda item: item[0])}
     class_freq = torch.tensor(list(overall_class_stats.values()))
     return class_freq, samples_with_class, list(overall_class_stats.keys())
     
     
 def get_class_probs(class_freq, temperature):
-    return torch.softmax(class_freq / temperature, dim=-1).numpy()
+    return torch.softmax(class_freq / temperature, dim=-1) # .numpy()
             
 
 def get_class_temp_linear(max_temp, min_temp, max_iter, current_iter):
@@ -85,8 +85,14 @@ class SCPList(Dataset):
         else:
             class_temp = self.max_temp
         class_probs = get_class_probs(self.class_freq, class_temp)
-        target = np.random.choice(self.class_keys, p=class_probs)
-        path = np.random.choice(self.class_samples[target])
+        target = int(torch.multinomial(class_probs, 1,replacement=True))
+        index = int(torch.randint(len(self.class_samples[target]),(1,1)))
+        path = self.class_samples[target][index]
+        
+        # numpy.random.choice always return same number for multi-process
+        # target = np.random.choice(self.class_keys, p=class_probs)
+        # path = np.random.choice(self.class_samples[target])
+        
         img = self.loader(path)
         if self.transform is not None:
             img = self.transform(img)
